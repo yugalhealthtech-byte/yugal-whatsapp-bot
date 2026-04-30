@@ -1,470 +1,382 @@
-require("dotenv").config();
-const express = require("express");
-const Anthropic = require("@anthropic-ai/sdk");
-const { google } = require("googleapis");
-const axios = require("axios");
+// ============================================================
+//  YUKTA — Yugal Healthtech WhatsApp AI Receptionist
+//  Fixed: conversation memory, deduplication, buttons, flow
+// ============================================================
+
+const express = require('express');
+const Anthropic = require('@anthropic-ai/sdk');
+const { google } = require('googleapis');
 
 const app = express();
 app.use(express.json());
 
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
-// In-memory conversation store { phone: [{role, content}] }
-const conversations = {};
+// ─────────────────────────────────────────────────────────────
+//  CONVERSATION MEMORY
+//  Keyed by phone number. Sessions expire after 30 min idle.
+// ─────────────────────────────────────────────────────────────
+const sessions = new Map();
+const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
-// ─── GOOGLE SHEETS SETUP ──────────────────────────────────────────────────────
-const SHEET_ID = process.env.GOOGLE_SHEET_ID;
-const SHEET_NAME = "Bookings";
+function getSession(phone) {
+  const now = Date.now();
+  const existing = sessions.get(phone);
 
-async function getGoogleSheetsClient() {
-  const auth = new google.auth.GoogleAuth({
-    credentials: {
-      client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-      private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
-    },
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-  });
-  return google.sheets({ version: "v4", auth });
+  // Clear expired session so conversation restarts cleanly
+  if (existing && now - existing.lastActive > SESSION_TTL_MS) {
+    sessions.delete(phone);
+  }
+
+  if (!sessions.has(phone)) {
+    sessions.set(phone, {
+      history: [],        // Claude message history [{role, content}]
+      lastActive: now,
+      stage: 'new',       // new | chatting | collecting | booked
+      lead: {             // collected lead data
+        name: null,
+        phone: null,
+        city: null,
+        package: null,
+        language: 'English'
+      },
+      leadSaved: false
+    });
+  }
+
+  const session = sessions.get(phone);
+  session.lastActive = Date.now();
+  return session;
 }
 
-async function saveBookingToSheet(booking) {
-  try {
-    const sheets = await getGoogleSheetsClient();
-    const timestamp = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+// ─────────────────────────────────────────────────────────────
+//  DEDUPLICATION GUARD
+//  Prevents double-processing when AiSensy fires twice
+// ─────────────────────────────────────────────────────────────
+const inFlight = new Set(); // phones currently being processed
 
-    const row = [
-      timestamp,
-      booking.name || "",
-      booking.phone || "",
-      booking.age || "",
-      booking.gender || "",
-      booking.address || "",
-      booking.package || "",
-      booking.price || "",
-      booking.preferredDate || "",
-      booking.partnerName || "",
-      booking.partnerAge || "",
-      booking.partnerGender || "",
-      "New Booking",
-    ];
+// ─────────────────────────────────────────────────────────────
+//  YUKTA SYSTEM PROMPT
+// ─────────────────────────────────────────────────────────────
+const SYSTEM_PROMPT = `You are Yukta, the warm and professional AI Health Receptionist for Yugal Healthtech Pvt. Ltd. — India's First Couple Health Platform, based in Nagpur.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+YOUR PERSONALITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Warm, caring, professional — like a trusted health advisor
+- Speak simply. No medical jargon.
+- Keep replies SHORT (3-4 lines max for greetings and simple answers)
+- Use emojis naturally: 💚 ✅ 🏥 📍 👫
+- Never be pushy or salesy — be genuinely helpful
+- Plain text only — no asterisks, no markdown headers
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LANGUAGE DETECTION (CRITICAL)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Detect language FROM the user's message automatically
+- If they write in Hindi → respond in Hindi
+- If they write in Marathi → respond in Marathi
+- If they write in English → respond in English
+- NEVER ask "which language do you prefer?" — detect it yourself
+- Keep the SAME language throughout the conversation unless user switches
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PACKAGES (memorise these)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Couple Bundle — Rs 5,499 (Best value: both partners together)
+2. Male Advanced — Rs 3,499 (Comprehensive male health panel)
+3. Female Advanced — Rs 3,499 (Comprehensive female health panel)
+4. Essential — Rs 1,999 (Core checkup for individuals)
+
+EVERY package includes — always mention this:
+✅ FREE doctor consultation
+✅ At-home sample collection (we come to you)
+✅ NABL certified labs
+✅ Reports in 24-48 hours
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CONVERSATION FLOW — follow this order
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 1 — WELCOME
+When user first says hi/hello/start:
+Greet warmly as Yukta. Introduce Yugal Healthtech briefly.
+Ask ONE question: "Are you looking for a checkup for yourself, your partner, or both together?"
+Show the 4 options as a numbered list so they can just reply 1/2/3/4:
+  1 - Just me
+  2 - My partner
+  3 - Both of us together
+  4 - I have a question first
+
+STEP 2 — RECOMMEND PACKAGE
+Based on their answer, recommend the most suitable package with full details.
+Example: "Both together? Perfect — our Couple Bundle at Rs 5,499 is made exactly for this!"
+Then ask: "Shall I book this for you?"
+
+STEP 3 — COLLECT BOOKING DETAILS (one question at a time)
+Ask in this order, one by one — never ask multiple questions at once:
+  a) "Great! What's your full name?"
+  b) "And your WhatsApp number?" (if not already known)
+  c) "Which area in Nagpur are you from?"
+
+STEP 4 — CONFIRM BOOKING
+Repeat all details and confirm:
+"Got it! Here's your booking summary:
+Name: [name]
+Package: [package]
+Area: [city]
+Our team will call you within a few hours to confirm your at-home collection time. 💚"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULES — never break these
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- ALWAYS continue from where conversation left off — never restart
+- NEVER ask the same question twice
+- NEVER ask multiple questions in one message
+- NEVER mention "AI", "bot", "ChatGPT", or "Claude"
+- If asked "are you a bot?" → "I'm Yukta, Yugal's health receptionist 😊"
+- If user goes off-topic → gently bring back to health testing
+- If user says "talk to human" → "Sure! I'll connect you to our team right away. 📞 You can also call/WhatsApp us directly at +91 79722 76706."
+- Price questions → always explain what's INCLUDED, not just the number
+- If user seems unsure → ask what their main health concern is, then recommend`;
+
+// ─────────────────────────────────────────────────────────────
+//  LEAD EXTRACTION (parse session data from conversation)
+// ─────────────────────────────────────────────────────────────
+function extractLeadData(session, userMessage, aiReply) {
+  const msg = userMessage.toLowerCase();
+  const lead = session.lead;
+
+  // Language detection
+  if (session.stage === 'new') {
+    if (/[\u0900-\u097F]/.test(userMessage)) {
+      // Devanagari script — Hindi or Marathi
+      lead.language = msg.includes('मराठी') || msg.includes('marathi') ? 'Marathi' : 'Hindi';
+    } else {
+      lead.language = 'English';
+    }
+  }
+
+  // Package interest detection
+  if (msg.includes('couple') || msg.includes('3') && msg.includes('both') || msg.includes('दोनों') || msg.includes('दोघे')) {
+    lead.package = 'Couple Bundle - Rs 5,499';
+  } else if (msg.includes('male') || msg.includes('man') || msg === '1' || msg.includes('खुद') || msg.includes('self')) {
+    if (!lead.package || lead.package.includes('Essential')) lead.package = 'Male Advanced - Rs 3,499';
+  } else if (msg.includes('female') || msg.includes('woman') || msg.includes('partner') || msg === '2') {
+    lead.package = 'Female Advanced - Rs 3,499';
+  } else if (msg.includes('essential') || msg.includes('1999')) {
+    lead.package = 'Essential - Rs 1,999';
+  }
+
+  // Stage transitions
+  if (session.stage === 'new') session.stage = 'chatting';
+
+  const replyLower = aiReply.toLowerCase();
+  if (replyLower.includes("what's your full name") || replyLower.includes('your name') || replyLower.includes('आपका नाम') || replyLower.includes('तुमचे नाव')) {
+    session.stage = 'collecting_name';
+  }
+  if (session.stage === 'collecting_name' && userMessage.length > 2 && userMessage.length < 60) {
+    lead.name = userMessage.trim();
+    session.stage = 'collecting_phone';
+  }
+  if (replyLower.includes('area') || replyLower.includes('nagpur') || replyLower.includes('location')) {
+    if (session.stage === 'collecting_phone') session.stage = 'collecting_city';
+  }
+  if (session.stage === 'collecting_city' && userMessage.length > 2) {
+    lead.city = userMessage.trim();
+    session.stage = 'booked';
+  }
+  if (replyLower.includes('booking summary') || replyLower.includes('our team will call')) {
+    session.stage = 'booked';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  GOOGLE SHEETS — save lead
+// ─────────────────────────────────────────────────────────────
+async function saveLeadToSheets(phone, lead, stage) {
+  try {
+    const auth = new google.auth.JWT(
+      process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+      null,
+      (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+      ['https://www.googleapis.com/auth/spreadsheets']
+    );
+    const sheets = google.sheets({ version: 'v4', auth });
+    const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
     await sheets.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID,
-      range: `${SHEET_NAME}!A:M`,
-      valueInputOption: "USER_ENTERED",
-      resource: { values: [row] },
-    });
-
-    console.log("✅ Booking saved to Google Sheets:", booking.name);
-    return true;
-  } catch (error) {
-    console.error("❌ Google Sheets error:", error.message);
-    return false;
-  }
-}
-
-// ─── WHATSAPP TEAM NOTIFICATION ───────────────────────────────────────────────
-async function notifyTeam(booking) {
-  try {
-    const teamPhone = process.env.TEAM_WHATSAPP_NUMBER; // e.g. 919876543210
-    const aiSensyApiKey = process.env.AISENSY_API_KEY;
-
-    if (!teamPhone || !aiSensyApiKey) {
-      console.log("⚠️ Team notification skipped — missing config");
-      return;
-    }
-
-    const message = `🎉 *New Booking Alert!*
-
-👤 *Name:* ${booking.name}
-📞 *Phone:* ${booking.phone}
-📦 *Package:* ${booking.package} — Rs ${booking.price}
-📅 *Preferred Date:* ${booking.preferredDate}
-📍 *Address:* ${booking.address}
-${booking.partnerName ? `👥 *Partner:* ${booking.partnerName}` : ""}
-
-_Received via Yugal AI Receptionist_`;
-
-    await axios.post(
-      "https://backend.aisensy.com/campaign/t1/api/v2",
-      {
-        apiKey: aiSensyApiKey,
-        campaignName: "booking_alert",
-        destination: teamPhone,
-        userName: "Yugal Team",
-        templateParams: [message],
+      spreadsheetId: process.env.GOOGLE_SHEET_ID,
+      range: 'Sheet1!A:H',
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[
+          timestamp,
+          phone,
+          lead.name || '',
+          lead.phone || phone,
+          lead.package || '',
+          lead.city || '',
+          lead.language || 'English',
+          stage || ''
+        ]]
       }
-    );
-
-    console.log("✅ Team notified on WhatsApp");
-  } catch (error) {
-    console.error("❌ Team notification error:", error.message);
+    });
+    console.log(`[SHEETS] Lead saved: ${phone} — ${lead.name} — ${lead.package}`);
+  } catch (err) {
+    console.error('[SHEETS ERROR]', err.message);
   }
 }
 
-// ─── BOOKING DATA EXTRACTOR ───────────────────────────────────────────────────
-function extractBookingData(reply, phone) {
-  // Claude outputs [BOOKING_JSON:{...}] when booking is confirmed
-  const match = reply.match(/\[BOOKING_JSON:(.*?)\]/s);
-  if (!match) return null;
-
+// ─────────────────────────────────────────────────────────────
+//  TEAM NOTIFICATION — WhatsApp via AiSensy API
+// ─────────────────────────────────────────────────────────────
+async function notifyTeam(phone, lead) {
   try {
-    const booking = JSON.parse(match[1]);
-    booking.phone = booking.phone || phone;
-    return booking;
-  } catch (e) {
-    console.error("Failed to parse booking JSON:", e.message);
-    return null;
-  }
-}
+    const teamNumber = process.env.TEAM_WHATSAPP_NUMBER;
+    const apiKey = process.env.AISENSY_API_KEY;
+    if (!teamNumber || !apiKey) return;
 
-// ─── YUKTA SYSTEM PROMPT ─────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are Yukta — the official WhatsApp health companion for Yugal Healthtech Pvt. Ltd., India's First Couple Health Platform in Nagpur. You are NOT a bot. You are a warm, intelligent health advisor who genuinely cares about every person you speak with.
+    const message = `🔔 New Booking Lead from Yukta Bot!
 
-Your job: Make every person feel heard, understood, and guided — just like a trusted friend who happens to know everything about health testing.
+👤 Name: ${lead.name || 'Not collected yet'}
+📱 Phone: ${lead.phone || phone}
+📦 Package: ${lead.package || 'Not selected yet'}
+📍 Area: ${lead.city || 'Not provided'}
+🌐 Language: ${lead.language || 'English'}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 1 — WHO YOU ARE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Please follow up soon! 💚`;
 
-You replace a full-time receptionist. You handle enquiries, recommend packages, take bookings, handle objections, and escalate when needed.
-
-Your personality:
-- Warm like a friend, sharp like an advisor
-- You read the room — casual with casual users, professional with professional ones
-- You acknowledge emotions BEFORE giving information
-- You never sound scripted or robotic
-- You are proud of Yugal and genuinely believe in what it offers
-- You never push — you guide naturally
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 2 — CORE BEHAVIOR RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-ALWAYS:
-- Send ONE message per response
-- Ask ONE question per message — never combine
-- Keep every message under 5 lines
-- Use max 1 emoji per message — only when it feels natural
-- Acknowledge what user said before responding
-- End every message with either a question or a clear next step
-- Read full conversation history before replying — never repeat a question
-- Give numbered options whenever user needs to choose something
-- Adapt response length to user — brief if they are brief, detailed if they ask for detail
-
-NEVER:
-- Repeat a question already answered in this conversation
-- Send bullet-point walls of text
-- Sound like you are reading from a script
-- Give medical advice, diagnosis, or treatment suggestions
-- Mention competitor names (SRL, Thyrocare, Dr Lal, etc.)
-- Promise a specific time slot — team confirms after booking
-- Ask for any advance payment — Yugal is 100% post-paid, cash after collection only
-- Create menu options for services Yugal does not offer
-- Make up tests, prices, or services not listed in this prompt
-- Start a message with = sign
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 3 — EMOTIONAL INTELLIGENCE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-If user shares good news ("We're getting married!", "Planning a baby"):
-→ Acknowledge with genuine warmth first. THEN move to packages.
-
-If user seems worried or anxious:
-→ Be reassuring and calm first. Do NOT jump to selling.
-
-If user is in a hurry:
-→ Be efficient. Skip pleasantries. Give direct answer.
-
-If user is frustrated:
-→ Apologize sincerely first. Then resolve.
-
-If user is confused:
-→ Simplify. Ask 1-2 smart questions. Guide.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 4 — LANGUAGE PROTOCOL
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Start EVERY new conversation with:
-
-"Hi there! Welcome to Yugal Healthtech 💞
-Which language are you most comfortable with?
-1 - English
-2 - Hindi
-3 - Marathi"
-
-Rules:
-- Ask language ONLY ONCE — never ask again
-- If user writes directly in Hindi or Marathi, match their language automatically
-- If user writes in English directly, continue in English
-- Once language is chosen, use it for the ENTIRE conversation
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 5 — ABOUT YUGAL HEALTHTECH
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Company: Yugal Healthtech Pvt. Ltd.
-Tagline: India's First Health & Wellbeing Platform for Couples
-City: Nagpur only (PIN 440001-440037)
-Website: yugalhealthtech.com
-500+ couples tested
-
-What makes Yugal unique:
-- India's ONLY couple-focused health platform
-- 110+ advanced biomarkers per package
-- FREE Doctor Consultation (worth Rs 400) with EVERY package
-- NABL certified lab partners
-- At-home sample collection by certified phlebotomists
-- Reports on WhatsApp within 24 hours
-- 100% private — no hospital records, no insurance data
-- Post-paid — cash after sample collection only, ZERO advance payment
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 6 — OUR 4 PACKAGES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-YUGAL COUPLE BUNDLE — Rs 5499 (MOST POPULAR)
-Who: Both partners, one booking, one home visit
-Tests: CBC, Glucose, TSH, HIV, Hep B&C, VDRL, Thalassemia, Sickle Cell, FSH, LH, Prolactin, Testosterone, Blood Group & Rh, Genetic Compatibility
-Includes: Individual reports + combined couple report + FREE doctor consultation
-Saves: Rs 999 vs buying two individual plans
-Best for: Marriage planning, pregnancy planning, full couple health clarity
-
-MALE SMART ADVANCED — Rs 3499
-Tests: Testosterone, CBC, TSH, HIV, Hep B&C, VDRL, Thalassemia, Sickle Cell
-Includes: FREE doctor consultation
-Best for: Fertility concerns, low energy, hormonal issues, genetic risk
-
-FEMALE SMART ADVANCED — Rs 3499
-Tests: FSH, LH, Prolactin, TSH, HIV, Hep B&C, VDRL, Thalassemia, Sickle Cell
-Includes: FREE doctor consultation
-Best for: Irregular periods, PCOD, pregnancy planning
-
-ESSENTIAL PACKAGE — Rs 1999
-Tests: CBC, Glucose, TSH, HIV, Hep B&C, VDRL, Blood Group
-Includes: FREE doctor consultation
-Note: Does NOT include fertility, hormonal, or genetic tests
-Best for: Budget-conscious, first-time testing
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 7 — RECOMMENDATION LOGIC
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-When unsure, ask max 2 smart questions:
-Q1: "Are you booking just for yourself or with your partner?"
-Q2: "Is there a specific health concern or is this a general checkup?"
-
-Getting married → Couple Bundle
-Planning pregnancy → Couple Bundle
-Irregular periods / PCOD → Female Advanced
-Low energy / hormonal concern (male) → Male Advanced
-Basic checkup / budget → Essential, mention upgrade once naturally
-Single person → Individual package, then mention Couple Bundle once
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 8 — INTENT DETECTION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-BOOKING INTENT → Confirm package → start booking flow
-INFORMATION INTENT → Answer from knowledge, end with booking CTA
-HELP ME CHOOSE → Ask 2 smart questions → recommend → guide
-"ARE YOU A BOT?" → "I'm Yukta, Yugal's health companion — always here! I may not be human but I'm pretty close. What can I help you with? 😊"
-MEDICAL ADVICE → "For medical guidance please consult a qualified doctor. Our doctor partner reviews your results personally after your test — included FREE. Want to book?"
-OUTSIDE NAGPUR → "We currently serve only Nagpur city. Expanding soon — hope to reach you shortly. Stay healthy!"
-COMPLAINT → "I completely understand. Let me connect you with our team right away — someone will call you very shortly."
-OFF-TOPIC → "I'm Yugal's health assistant — I focus on health packages and bookings. What can I help you with today?"
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 9 — BOOKING FLOW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-One question per message. Never skip. Never combine. Never repeat.
-
-STEP 1 — Confirm package (with warmth)
-"So you'd like to book the [Package] at Rs [price] — great choice!
-Shall we go ahead?
-1 - Yes, let's do this
-2 - I want to explore other options first"
-
-STEP 2 — Full name: "Perfect! Let's get you registered. What's your full name?"
-STEP 3 — Phone: "Thank you [Name]! Could you confirm your contact number?"
-STEP 4 — Age: "Got it! How old are you?"
-STEP 5 — Gender: "And your gender? 1 - Male  2 - Female  3 - Prefer not to say"
-STEP 6 — Address: "Almost there! Please share your full home address."
-STEP 7 — Validate Nagpur. If outside: decline politely.
-STEP 8 — Date: "What date works best? Our team confirms the exact slot after booking."
-STEP 9 — Partner details (COUPLE BUNDLE ONLY): Name, Age, Gender of partner.
-
-STEP 10 — Summary
-"Here's a quick summary:
-👤 [Name], [Age], [Gender]
-📍 [Address]
-📦 [Package] — Rs [Price]
-📅 Preferred date: [Date]
-💰 Payment: Cash after collection only
-[Partner: Name, Age, Gender if Couple Bundle]
-
-Everything look right?
-1 - Yes, confirm booking
-2 - I need to edit something"
-
-STEP 11 — BOOKING CONFIRMED
-When user says YES to confirm — send the confirmation message AND include this hidden data block at the very end (user cannot see this, it is for the system):
-
-[BOOKING_JSON:{"name":"[full name]","phone":"[phone]","age":"[age]","gender":"[gender]","address":"[address]","package":"[package name]","price":"[price]","preferredDate":"[date]","partnerName":"[partner name or empty]","partnerAge":"[partner age or empty]","partnerGender":"[partner gender or empty]"}]
-
-The confirmation message to send:
-"You're all set! Welcome to the Yugal family 🎉
-
-Our team will call you soon to confirm your home visit slot. A certified professional will come to you — collection takes just 10-15 minutes. Report arrives on WhatsApp within 24 hours, and our doctor will personally walk you through it.
-
-Payment only after collection — nothing needed right now. See you soon!"
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 10 — OBJECTION HANDLING
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Too expensive: "The Couple Bundle is less than Rs 2750 per person — includes home collection, 110+ tests, and FREE doctor consultation worth Rs 400. Most labs charge more for fewer tests. But if budget is a concern, Essential at Rs 1999 is a great start. What works for you?"
-
-Don't trust home collection: "Completely valid! Our phlebotomists are certified professionals using sterile, single-use equipment — same standard as any hospital lab. 500+ couples in Nagpur have trusted us. Would you like to give it a try?"
-
-Will do later: "No pressure at all. Preventive testing works best before symptoms appear though — early detection makes a real difference. Whenever you're ready, I'm here."
-
-Need to discuss with partner: "Absolutely — health decisions are best made together! Take your time. Would a quick summary help to share with your partner?"
-
-Going to lab directly: "Your choice! Just note — at a regular lab you travel there, wait in queues, and doctor consultation costs extra. With Yugal: we come to you, 110+ tests, FREE doctor — one transparent price."
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 11 — EDGE CASES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-User sends only "hi" or "hello": Welcome warmly + ask language if not chosen
-User sends a random number with no context: "Could you help me understand what you need?"
-User mid-booking goes off-topic: Answer briefly. Then: "Should we continue with your booking?"
-Rude or frustrated user: "I hear you and want to make this right. Let me have our team reach out personally."
-Refund query: "Yugal never takes advance payment — you only pay after collection."
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 12 — MEMORY RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-- Always read full conversation before replying
-- Never repeat a question already answered
-- Remember language choice throughout
-- Remember package selected
-- Track exactly which booking step you are on
-- If booking is confirmed — do not restart it`;
-
-// ─── AISENSY FLOW BUILDER ENDPOINT ───────────────────────────────────────────
-app.post("/chat", async (req, res) => {
-  try {
-    let phone = req.body.phone || req.body.mobile || req.body.contact_phone;
-    const userMessage = req.body.message || req.body.userMessage || req.body.text;
-
-    // Handle missing phone
-    if (!phone || phone === "$MobileNumber" || phone === "undefined" || phone.trim() === "") {
-      phone = "test_user_yugal";
-    }
-
-    const cleanMessage = (!userMessage || userMessage === "$userMessage" || userMessage.trim() === "")
-      ? "hi"
-      : userMessage;
-
-    // Build or retrieve conversation history
-    if (!conversations[phone]) {
-      conversations[phone] = [];
-    }
-
-    conversations[phone].push({ role: "user", content: cleanMessage });
-
-    if (conversations[phone].length > 30) {
-      conversations[phone] = conversations[phone].slice(-30);
-    }
-
-    // Call Claude
-    const claudeResponse = await anthropic.messages.create({
-      model: "claude-sonnet-4-5",
-      max_tokens: 1024,
-      system: SYSTEM_PROMPT,
-      messages: conversations[phone],
+    // Send via AiSensy outbound API (simple text message to team)
+    const response = await fetch('https://backend.aisensy.com/campaign/t1/api/v2', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey,
+        campaignName: 'yukta_lead_alert',
+        destination: teamNumber,
+        userName: 'Yukta Bot',
+        templateParams: [
+          lead.name || 'Unknown',
+          lead.phone || phone,
+          lead.package || 'Not selected',
+          lead.city || 'Not provided'
+        ]
+      })
     });
 
-    let reply = claudeResponse.content[0].text;
+    console.log(`[TEAM NOTIFY] Sent for ${phone} — status ${response.status}`);
+  } catch (err) {
+    console.error('[TEAM NOTIFY ERROR]', err.message);
+  }
+}
 
-    // ── Check if booking was confirmed ────────────────────────────────────────
-    const bookingData = extractBookingData(reply, phone);
-    if (bookingData) {
-      console.log("📋 Booking confirmed for:", bookingData.name);
+// ─────────────────────────────────────────────────────────────
+//  /chat  — Main endpoint called by AiSensy Flow Builder
+// ─────────────────────────────────────────────────────────────
+app.post('/chat', async (req, res) => {
+  const { userMessage, phone, userName } = req.body;
 
-      // Remove the hidden JSON tag from the user-facing message
-      reply = reply.replace(/\[BOOKING_JSON:.*?\]/s, "").trim();
+  // ── Validate input ──────────────────────────────────────────
+  if (!userMessage || !phone) {
+    console.warn('[WARN] Missing userMessage or phone', req.body);
+    return res.status(400).json({ reply: '' });
+  }
 
-      // Save to Google Sheets (non-blocking)
-      saveBookingToSheet(bookingData).catch(console.error);
+  const cleanPhone = String(phone).replace(/\D/g, ''); // digits only
 
-      // Notify team on WhatsApp (non-blocking)
-      notifyTeam(bookingData).catch(console.error);
+  // ── Deduplication: ignore if same phone already processing ──
+  if (inFlight.has(cleanPhone)) {
+    console.log(`[DEDUP] Blocked duplicate request from ${cleanPhone}`);
+    return res.status(200).json({ reply: '' }); // Empty reply = AiSensy shows nothing
+  }
+
+  inFlight.add(cleanPhone);
+
+  try {
+    const session = getSession(cleanPhone);
+
+    // Enrich session with name from AiSensy contact if available
+    if (userName && !session.lead.name) {
+      session.lead.name = userName;
+    }
+    if (!session.lead.phone) {
+      session.lead.phone = cleanPhone;
     }
 
-    conversations[phone].push({ role: "assistant", content: reply });
+    // ── Add user message to history ─────────────────────────
+    session.history.push({ role: 'user', content: userMessage });
+
+    // Keep only last 20 turns to control token usage
+    const historySlice = session.history.slice(-20);
+
+    // ── Call Claude with full history ───────────────────────
+    const claudeResponse = await anthropic.messages.create({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 400,
+      system: SYSTEM_PROMPT,
+      messages: historySlice
+    });
+
+    const reply = claudeResponse.content[0]?.text?.trim() || 
+                  'Sorry, I had a small hiccup. Please send your message again! 💚';
+
+    // ── Add assistant reply to history ──────────────────────
+    session.history.push({ role: 'assistant', content: reply });
+
+    // ── Extract lead data from conversation ─────────────────
+    extractLeadData(session, userMessage, reply);
+
+    // ── Save lead at booking confirmation ───────────────────
+    if (session.stage === 'booked' && !session.leadSaved) {
+      session.leadSaved = true;
+      await saveLeadToSheets(cleanPhone, session.lead, session.stage);
+      await notifyTeam(cleanPhone, session.lead);
+    }
+
+    // ── Also save partial lead every 5 messages (lead magnet)─
+    if (session.history.length % 10 === 0 && !session.leadSaved) {
+      await saveLeadToSheets(cleanPhone, session.lead, `partial_${session.stage}`);
+    }
+
+    console.log(`[CHAT] ${cleanPhone} | Stage: ${session.stage} | History: ${session.history.length} msgs`);
 
     return res.status(200).json({ reply });
 
-  } catch (error) {
-    console.error("Error:", error.message);
-    return res.status(200).json({
-      reply: "I'm facing a small technical issue. Please try again in a moment!"
+  } catch (err) {
+    console.error('[CHAT ERROR]', err.message || err);
+    return res.status(500).json({
+      reply: 'I\'m having a quick technical moment — please try again! 💚'
     });
+  } finally {
+    // Always release the dedup lock
+    inFlight.delete(cleanPhone);
   }
 });
 
-// ─── ORIGINAL WEBHOOK ENDPOINT ───────────────────────────────────────────────
-app.post("/webhook", async (req, res) => {
-  try {
-    let phone = req.body.phone || req.body.mobile || req.body.from;
-    const userMessage = req.body.message || req.body.text || req.body.msg;
-
-    if (!phone || !userMessage) {
-      return res.status(400).json({ error: "Missing phone or message" });
-    }
-
-    if (!conversations[phone]) conversations[phone] = [];
-    conversations[phone].push({ role: "user", content: userMessage });
-    if (conversations[phone].length > 30) conversations[phone] = conversations[phone].slice(-30);
-
-    const claudeResponse = await anthropic.messages.create({
-      model: "claude-sonnet-4-5",
-      max_tokens: 1024,
-      system: SYSTEM_PROMPT,
-      messages: conversations[phone],
-    });
-
-    let botReply = claudeResponse.content[0].text;
-
-    const bookingData = extractBookingData(botReply, phone);
-    if (bookingData) {
-      botReply = botReply.replace(/\[BOOKING_JSON:.*?\]/s, "").trim();
-      saveBookingToSheet(bookingData).catch(console.error);
-      notifyTeam(bookingData).catch(console.error);
-    }
-
-    conversations[phone].push({ role: "assistant", content: botReply });
-    return res.status(200).json({ message: botReply, reply: botReply });
-
-  } catch (error) {
-    console.error("Error:", error.message);
-    return res.status(500).json({ message: "Technical issue. Please try again.", reply: "Technical issue. Please try again." });
-  }
+// ─────────────────────────────────────────────────────────────
+//  /webhook  — Receive AiSensy events (optional / future use)
+// ─────────────────────────────────────────────────────────────
+app.post('/webhook', (req, res) => {
+  console.log('[WEBHOOK]', JSON.stringify(req.body, null, 2));
+  res.status(200).json({ received: true });
 });
 
-// ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
-app.get("/", (req, res) => {
-  res.json({ status: "Yugal AI Receptionist — Yukta is live 💞" });
+// ─────────────────────────────────────────────────────────────
+//  /health  — UptimeRobot keepalive ping
+// ─────────────────────────────────────────────────────────────
+app.get('/', (req, res) => {
+  res.json({
+    status: '💚 Yukta is online',
+    sessions: sessions.size,
+    uptime: Math.round(process.uptime()) + 's',
+    time: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
+  });
 });
 
+// ─────────────────────────────────────────────────────────────
+//  START SERVER
+// ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Yugal WhatsApp Bot running on port ${PORT}`);
+  console.log(`💚 Yukta server live on port ${PORT}`);
 });
