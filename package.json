@@ -1,0 +1,22 @@
+{
+  "name": "yugal-whatsapp-bot",
+  "version": "1.0.0",
+  "description": "Yugal Healthtech WhatsApp AI Receptionist",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.19.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
