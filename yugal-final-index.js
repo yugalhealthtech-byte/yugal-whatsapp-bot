@@ -1,6 +1,8 @@
 require("dotenv").config();
 const express = require("express");
 const Anthropic = require("@anthropic-ai/sdk");
+const { google } = require("googleapis");
+const axios = require("axios");
 
 const app = express();
 app.use(express.json());
@@ -9,6 +11,112 @@ const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 
 // In-memory conversation store { phone: [{role, content}] }
 const conversations = {};
+
+// ─── GOOGLE SHEETS SETUP ──────────────────────────────────────────────────────
+const SHEET_ID = process.env.GOOGLE_SHEET_ID;
+const SHEET_NAME = "Bookings";
+
+async function getGoogleSheetsClient() {
+  const auth = new google.auth.GoogleAuth({
+    credentials: {
+      client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+      private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+    },
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+  return google.sheets({ version: "v4", auth });
+}
+
+async function saveBookingToSheet(booking) {
+  try {
+    const sheets = await getGoogleSheetsClient();
+    const timestamp = new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+
+    const row = [
+      timestamp,
+      booking.name || "",
+      booking.phone || "",
+      booking.age || "",
+      booking.gender || "",
+      booking.address || "",
+      booking.package || "",
+      booking.price || "",
+      booking.preferredDate || "",
+      booking.partnerName || "",
+      booking.partnerAge || "",
+      booking.partnerGender || "",
+      "New Booking",
+    ];
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: `${SHEET_NAME}!A:M`,
+      valueInputOption: "USER_ENTERED",
+      resource: { values: [row] },
+    });
+
+    console.log("✅ Booking saved to Google Sheets:", booking.name);
+    return true;
+  } catch (error) {
+    console.error("❌ Google Sheets error:", error.message);
+    return false;
+  }
+}
+
+// ─── WHATSAPP TEAM NOTIFICATION ───────────────────────────────────────────────
+async function notifyTeam(booking) {
+  try {
+    const teamPhone = process.env.TEAM_WHATSAPP_NUMBER; // e.g. 919876543210
+    const aiSensyApiKey = process.env.AISENSY_API_KEY;
+
+    if (!teamPhone || !aiSensyApiKey) {
+      console.log("⚠️ Team notification skipped — missing config");
+      return;
+    }
+
+    const message = `🎉 *New Booking Alert!*
+
+👤 *Name:* ${booking.name}
+📞 *Phone:* ${booking.phone}
+📦 *Package:* ${booking.package} — Rs ${booking.price}
+📅 *Preferred Date:* ${booking.preferredDate}
+📍 *Address:* ${booking.address}
+${booking.partnerName ? `👥 *Partner:* ${booking.partnerName}` : ""}
+
+_Received via Yugal AI Receptionist_`;
+
+    await axios.post(
+      "https://backend.aisensy.com/campaign/t1/api/v2",
+      {
+        apiKey: aiSensyApiKey,
+        campaignName: "booking_alert",
+        destination: teamPhone,
+        userName: "Yugal Team",
+        templateParams: [message],
+      }
+    );
+
+    console.log("✅ Team notified on WhatsApp");
+  } catch (error) {
+    console.error("❌ Team notification error:", error.message);
+  }
+}
+
+// ─── BOOKING DATA EXTRACTOR ───────────────────────────────────────────────────
+function extractBookingData(reply, phone) {
+  // Claude outputs [BOOKING_JSON:{...}] when booking is confirmed
+  const match = reply.match(/\[BOOKING_JSON:(.*?)\]/s);
+  if (!match) return null;
+
+  try {
+    const booking = JSON.parse(match[1]);
+    booking.phone = booking.phone || phone;
+    return booking;
+  } catch (e) {
+    console.error("Failed to parse booking JSON:", e.message);
+    return null;
+  }
+}
 
 // ─── YUKTA SYSTEM PROMPT ─────────────────────────────────────────────────────
 const SYSTEM_PROMPT = `You are Yukta — the official WhatsApp health companion for Yugal Healthtech Pvt. Ltd., India's First Couple Health Platform in Nagpur. You are NOT a bot. You are a warm, intelligent health advisor who genuinely cares about every person you speak with.
@@ -180,50 +288,34 @@ Shall we go ahead?
 1 - Yes, let's do this
 2 - I want to explore other options first"
 
-STEP 2 — Full name
-"Perfect! Let's get you registered. What's your full name?"
-
-STEP 3 — Phone number
-"Thank you [Name]! Could you confirm your contact number? We'll use it to coordinate your home visit."
-
-STEP 4 — Age
-"Got it! How old are you?"
-
-STEP 5 — Gender
-"And your gender?
-1 - Male
-2 - Female
-3 - Prefer not to say"
-
-STEP 6 — Home address
-"Almost there! Please share your full home address where our professional should visit."
-
-STEP 7 — Validate Nagpur
-If outside Nagpur: "Thank you! We currently serve only Nagpur city but are expanding soon. Hope to be with you shortly!"
-If Nagpur: Continue
-
-STEP 8 — Preferred date
-"What date works best for the home visit? Our team will confirm the exact time slot after booking."
-
-STEP 9 — Partner details (COUPLE BUNDLE ONLY)
-"Now let me quickly take your partner's details. What's your partner's full name?"
-Then: Partner age, Partner gender
+STEP 2 — Full name: "Perfect! Let's get you registered. What's your full name?"
+STEP 3 — Phone: "Thank you [Name]! Could you confirm your contact number?"
+STEP 4 — Age: "Got it! How old are you?"
+STEP 5 — Gender: "And your gender? 1 - Male  2 - Female  3 - Prefer not to say"
+STEP 6 — Address: "Almost there! Please share your full home address."
+STEP 7 — Validate Nagpur. If outside: decline politely.
+STEP 8 — Date: "What date works best? Our team confirms the exact slot after booking."
+STEP 9 — Partner details (COUPLE BUNDLE ONLY): Name, Age, Gender of partner.
 
 STEP 10 — Summary
 "Here's a quick summary:
-
 👤 [Name], [Age], [Gender]
 📍 [Address]
 📦 [Package] — Rs [Price]
 📅 Preferred date: [Date]
 💰 Payment: Cash after collection only
-[For Couple Bundle: 👤 Partner: [Name], [Age], [Gender]]
+[Partner: Name, Age, Gender if Couple Bundle]
 
 Everything look right?
 1 - Yes, confirm booking
 2 - I need to edit something"
 
-STEP 11 — Booking confirmed
+STEP 11 — BOOKING CONFIRMED
+When user says YES to confirm — send the confirmation message AND include this hidden data block at the very end (user cannot see this, it is for the system):
+
+[BOOKING_JSON:{"name":"[full name]","phone":"[phone]","age":"[age]","gender":"[gender]","address":"[address]","package":"[package name]","price":"[price]","preferredDate":"[date]","partnerName":"[partner name or empty]","partnerAge":"[partner age or empty]","partnerGender":"[partner gender or empty]"}]
+
+The confirmation message to send:
 "You're all set! Welcome to the Yugal family 🎉
 
 Our team will call you soon to confirm your home visit slot. A certified professional will come to you — collection takes just 10-15 minutes. Report arrives on WhatsApp within 24 hours, and our doctor will personally walk you through it.
@@ -238,21 +330,21 @@ Too expensive: "The Couple Bundle is less than Rs 2750 per person — includes h
 
 Don't trust home collection: "Completely valid! Our phlebotomists are certified professionals using sterile, single-use equipment — same standard as any hospital lab. 500+ couples in Nagpur have trusted us. Would you like to give it a try?"
 
-Will do later: "No pressure at all. Preventive testing works best before symptoms appear though — early detection makes a real difference. Whenever you're ready, I'm here. Want me to note your details?"
+Will do later: "No pressure at all. Preventive testing works best before symptoms appear though — early detection makes a real difference. Whenever you're ready, I'm here."
 
 Need to discuss with partner: "Absolutely — health decisions are best made together! Take your time. Would a quick summary help to share with your partner?"
 
-Going to lab directly: "Your choice! Just note — at a regular lab you travel there, wait in queues, and doctor consultation costs extra. With Yugal: we come to you, 110+ tests, FREE doctor — one transparent price. Want to compare?"
+Going to lab directly: "Your choice! Just note — at a regular lab you travel there, wait in queues, and doctor consultation costs extra. With Yugal: we come to you, 110+ tests, FREE doctor — one transparent price."
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PART 11 — EDGE CASES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 User sends only "hi" or "hello": Welcome warmly + ask language if not chosen
-User sends a random number with no context: "Could you help me understand what you need? Are you looking to book a test or know about our packages?"
-User mid-booking goes off-topic: Answer briefly. Then: "Should we continue with your booking? We were at [step]."
-Rude or frustrated user: "I hear you and want to make this right. Let me have our team reach out to you personally right away."
-Refund query: "Yugal never takes advance payment — you only pay after collection. If something hasn't gone right, our team will sort it out."
+User sends a random number with no context: "Could you help me understand what you need?"
+User mid-booking goes off-topic: Answer briefly. Then: "Should we continue with your booking?"
+Rude or frustrated user: "I hear you and want to make this right. Let me have our team reach out personally."
+Refund query: "Yugal never takes advance payment — you only pay after collection."
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PART 12 — MEMORY RULES
@@ -260,33 +352,33 @@ PART 12 — MEMORY RULES
 
 - Always read full conversation before replying
 - Never repeat a question already answered
-- Remember language choice — use it throughout
-- Remember package selected — do not re-ask
+- Remember language choice throughout
+- Remember package selected
 - Track exactly which booking step you are on
-- If booking is confirmed — do not restart it
-- Build on what user said — acknowledge and connect`;
+- If booking is confirmed — do not restart it`;
 
 // ─── AISENSY FLOW BUILDER ENDPOINT ───────────────────────────────────────────
-// This endpoint is called by AiSensy's API Request block in Flow Builder
 app.post("/chat", async (req, res) => {
   try {
-    const phone = req.body.phone || req.body.mobile || req.body.contact_phone;
+    let phone = req.body.phone || req.body.mobile || req.body.contact_phone;
     const userMessage = req.body.message || req.body.userMessage || req.body.text;
 
-    if (!phone || !userMessage) {
-      return res.status(200).json({
-        reply: "Hi! Welcome to Yugal Healthtech. How can I help you today?"
-      });
+    // Handle missing phone
+    if (!phone || phone === "$MobileNumber" || phone === "undefined" || phone.trim() === "") {
+      phone = "test_user_yugal";
     }
+
+    const cleanMessage = (!userMessage || userMessage === "$userMessage" || userMessage.trim() === "")
+      ? "hi"
+      : userMessage;
 
     // Build or retrieve conversation history
     if (!conversations[phone]) {
       conversations[phone] = [];
     }
 
-    conversations[phone].push({ role: "user", content: userMessage });
+    conversations[phone].push({ role: "user", content: cleanMessage });
 
-    // Keep last 30 messages
     if (conversations[phone].length > 30) {
       conversations[phone] = conversations[phone].slice(-30);
     }
@@ -299,10 +391,25 @@ app.post("/chat", async (req, res) => {
       messages: conversations[phone],
     });
 
-    const reply = claudeResponse.content[0].text;
+    let reply = claudeResponse.content[0].text;
+
+    // ── Check if booking was confirmed ────────────────────────────────────────
+    const bookingData = extractBookingData(reply, phone);
+    if (bookingData) {
+      console.log("📋 Booking confirmed for:", bookingData.name);
+
+      // Remove the hidden JSON tag from the user-facing message
+      reply = reply.replace(/\[BOOKING_JSON:.*?\]/s, "").trim();
+
+      // Save to Google Sheets (non-blocking)
+      saveBookingToSheet(bookingData).catch(console.error);
+
+      // Notify team on WhatsApp (non-blocking)
+      notifyTeam(bookingData).catch(console.error);
+    }
+
     conversations[phone].push({ role: "assistant", content: reply });
 
-    // AiSensy Flow Builder captures the "reply" field
     return res.status(200).json({ reply });
 
   } catch (error) {
@@ -313,25 +420,19 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-// ─── ORIGINAL WEBHOOK ENDPOINT (kept for backward compatibility) ──────────────
+// ─── ORIGINAL WEBHOOK ENDPOINT ───────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
   try {
-    const phone = req.body.phone || req.body.mobile || req.body.from;
+    let phone = req.body.phone || req.body.mobile || req.body.from;
     const userMessage = req.body.message || req.body.text || req.body.msg;
 
     if (!phone || !userMessage) {
       return res.status(400).json({ error: "Missing phone or message" });
     }
 
-    if (!conversations[phone]) {
-      conversations[phone] = [];
-    }
-
+    if (!conversations[phone]) conversations[phone] = [];
     conversations[phone].push({ role: "user", content: userMessage });
-
-    if (conversations[phone].length > 30) {
-      conversations[phone] = conversations[phone].slice(-30);
-    }
+    if (conversations[phone].length > 30) conversations[phone] = conversations[phone].slice(-30);
 
     const claudeResponse = await anthropic.messages.create({
       model: "claude-sonnet-4-5",
@@ -340,17 +441,21 @@ app.post("/webhook", async (req, res) => {
       messages: conversations[phone],
     });
 
-    const botReply = claudeResponse.content[0].text;
-    conversations[phone].push({ role: "assistant", content: botReply });
+    let botReply = claudeResponse.content[0].text;
 
+    const bookingData = extractBookingData(botReply, phone);
+    if (bookingData) {
+      botReply = botReply.replace(/\[BOOKING_JSON:.*?\]/s, "").trim();
+      saveBookingToSheet(bookingData).catch(console.error);
+      notifyTeam(bookingData).catch(console.error);
+    }
+
+    conversations[phone].push({ role: "assistant", content: botReply });
     return res.status(200).json({ message: botReply, reply: botReply });
 
   } catch (error) {
     console.error("Error:", error.message);
-    return res.status(500).json({
-      message: "I'm facing a technical issue. Please try again in a moment.",
-      reply: "I'm facing a technical issue. Please try again in a moment."
-    });
+    return res.status(500).json({ message: "Technical issue. Please try again.", reply: "Technical issue. Please try again." });
   }
 });
 
@@ -359,7 +464,6 @@ app.get("/", (req, res) => {
   res.json({ status: "Yugal AI Receptionist — Yukta is live 💞" });
 });
 
-// ─── START SERVER ─────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Yugal WhatsApp Bot running on port ${PORT}`);
