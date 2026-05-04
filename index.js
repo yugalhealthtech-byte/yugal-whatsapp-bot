@@ -3,6 +3,7 @@
 //  v3.0 — SessionId based memory (no phone variable needed)
 // ============================================================
 
+require('dotenv').config();
 const express = require('express');
 const Anthropic = require('@anthropic-ai/sdk');
 const { google } = require('googleapis');
@@ -90,6 +91,16 @@ Every package includes — ALWAYS mention this:
 ✅ Reports in 24-48 hours
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LOCATION VALIDATION - NAGPUR ONLY (VERY IMPORTANT)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Before proceeding with booking details, you MUST verify that the user is from Nagpur.
+- Ask the user: "Are you from Nagpur? Please share your area name or pincode."
+- If the user provides a Pincode: Valid Nagpur pincodes generally start with 440 or 441 (e.g., 440001 to 440035, 441108 for Hingna, 441110 for Kamptee, etc.).
+- If the user provides an Area: Check if it sounds like a Nagpur area. Examples include: Dharampeth, Sitabuldi, Wardhaman Nagar, Sadar, Itwari, Mahal, Pratap Nagar, Manish Nagar, Somalwada, Besa, Pipla, Nandanvan, Dighori, Manewada, Hudkeshwar, Trimurti Nagar, Laxmi Nagar, Bajaj Nagar, Shankar Nagar, Ramdaspeth, Civil Lines, Khamla, Dhantoli, Gittikhadan, Mankapur, Koradi, Jaripatka, Indora, Kamptee, Hingna, Wadi, Mihan, Butibori, Kalamna, Pardi, Ayodhya Nagar, Sakkardara, Medical Square, Reshimbagh, Cotton Market, Narsala, Narela, etc.
+- If the area or pincode is NOT in Nagpur: Politely apologize and say "Currently, our home collection services are only available in Nagpur. We hope to serve you in the future! 💚" and DO NOT proceed with booking.
+- If it is in Nagpur: Acknowledge it and proceed.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CONVERSATION FLOW
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 When user says hi / START_CONVERSATION:
@@ -104,9 +115,11 @@ When user says "Show me your health packages":
 → Ask which one interests them
 
 When user says "I want to book a health test":
+→ Verify Location (Nagpur area/pincode) FIRST.
 → Ask: self, partner, or both?
 → Recommend the right package
-→ Collect details one at a time: Name → Area in Nagpur → Confirm
+→ Collect Name
+→ Confirm Booking
 
 For any free-text question:
 → Answer helpfully and specifically
@@ -115,7 +128,7 @@ For any free-text question:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 BOOKING COLLECTION — one question at a time
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Order: Full name → Area in Nagpur → Confirm
+Order: Nagpur Area Validation → Full name → Package Selection → Confirm
 
 Booking confirmation:
 "Your booking is noted! 💚
@@ -182,10 +195,13 @@ function extractLeadData(session, userMessage, aiReply) {
 // ─────────────────────────────────────────────────────────────
 async function saveLeadToSheets(sessionId, lead, stage) {
   try {
+    const rawKey = (process.env.GOOGLE_PRIVATE_KEY || '')
+      .replace(/^"|"$/g, '')   // strip surrounding quotes if any
+      .replace(/\\n/g, '\n');  // convert escaped \n to real newlines
     const auth = new google.auth.JWT(
       process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
       null,
-      (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+      rawKey,
       ['https://www.googleapis.com/auth/spreadsheets']
     );
     const sheets = google.sheets({ version: 'v4', auth });
@@ -245,15 +261,13 @@ async function notifyTeam(sessionId, lead) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  /chat — Main endpoint
+//  Core Chat Processing Function
 // ─────────────────────────────────────────────────────────────
-app.post('/chat', async (req, res) => {
-  const { userMessage, sessionId: incomingSessionId, userName } = req.body;
-
+async function processChat(incomingSessionId, userMessage, userName) {
   // Reject empty messages
   if (!userMessage || userMessage.trim() === '') {
     console.warn('[WARN] Empty userMessage received');
-    return res.status(200).json({ reply: '', sessionId: incomingSessionId || '' });
+    return { reply: '', sessionId: incomingSessionId || '' };
   }
 
   // Generate new sessionId if this is the first message
@@ -264,7 +278,7 @@ app.post('/chat', async (req, res) => {
   // Deduplication
   if (inFlight.has(sessionId)) {
     console.log(`[DEDUP] Blocked duplicate for ${sessionId}`);
-    return res.status(200).json({ reply: '', sessionId });
+    return { reply: '', sessionId };
   }
 
   inFlight.add(sessionId);
@@ -279,15 +293,15 @@ app.post('/chat', async (req, res) => {
     // Keep last 20 messages
     const historySlice = session.history.slice(-20);
 
-    // Call Claude
-    const claudeResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-5',
+    // Call Anthropic Claude
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
       max_tokens: 400,
       system: SYSTEM_PROMPT,
       messages: historySlice
     });
 
-    const reply = claudeResponse.content[0]?.text?.trim() ||
+    const reply = response.content[0]?.text?.trim() ||
       "I had a small hiccup — please try again! 💚";
 
     // Add reply to history
@@ -310,26 +324,97 @@ app.post('/chat', async (req, res) => {
 
     console.log(`[CHAT] ${sessionId} | Stage: ${session.stage} | Msgs: ${session.history.length}`);
 
-    // Return reply AND sessionId — AiSensy stores sessionId as attribute
-    return res.status(200).json({ reply, sessionId });
+    return { reply, sessionId };
 
   } catch (err) {
-    console.error('[ERROR]', err.message);
-    return res.status(500).json({
+    if (err.response) {
+      console.error('[ERROR] Anthropic API Error:', JSON.stringify(err.response.data));
+    } else {
+      console.error('[ERROR]', err.stack || err.message);
+    }
+    return {
       reply: "I'm having a quick technical moment — please try again! 💚",
       sessionId: incomingSessionId || ''
-    });
+    };
   } finally {
     inFlight.delete(sessionId);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  /chat — Main endpoint (For Terminal/Testing)
+// ─────────────────────────────────────────────────────────────
+app.post('/chat', async (req, res) => {
+  const { userMessage, sessionId, userName } = req.body;
+  const result = await processChat(sessionId, userMessage, userName);
+  return res.status(200).json(result);
+});
+
+// ─────────────────────────────────────────────────────────────
+//  Meta WhatsApp Webhook Verification (GET)
+// ─────────────────────────────────────────────────────────────
+app.get('/webhook', (req, res) => {
+  const verifyToken = process.env.META_WEBHOOK_VERIFY_TOKEN;
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode && token) {
+    if (mode === 'subscribe' && token === verifyToken) {
+      console.log('[META] Webhook Verified Successfully! ✅');
+      res.status(200).send(challenge);
+    } else {
+      res.sendStatus(403);
+    }
+  } else {
+    res.sendStatus(400);
   }
 });
 
 // ─────────────────────────────────────────────────────────────
-//  Health check & webhook
+//  Meta WhatsApp Incoming Messages (POST)
 // ─────────────────────────────────────────────────────────────
-app.post('/webhook', (req, res) => {
-  console.log('[WEBHOOK]', JSON.stringify(req.body));
-  res.status(200).json({ received: true });
+app.post('/webhook', async (req, res) => {
+  try {
+    const body = req.body;
+
+    // Check if request is from WhatsApp API
+    if (body.object === 'whatsapp_business_account') {
+      const entry = body.entry?.[0];
+      const changes = entry?.changes?.[0];
+      const value = changes?.value;
+      const messages = value?.messages;
+
+      // WhatsApp requires a 200 OK immediately so it doesn't retry
+      res.status(200).send('EVENT_RECEIVED');
+
+      if (messages && messages[0]) {
+        const msg = messages[0];
+
+        // Handle Text Messages
+        if (msg.type === 'text') {
+          const sessionId = msg.from; // User's WhatsApp Number
+          const userMessage = msg.text.body;
+          const userName = value.contacts?.[0]?.profile?.name || '';
+
+          console.log(`[META INCOMING] ${userName} (${sessionId}): ${userMessage}`);
+
+          // Process the message using Claude
+          const result = await processChat(sessionId, userMessage, userName);
+
+          // Send reply back via Meta API
+          if (result && result.reply) {
+            await sendMetaReply(sessionId, result.reply);
+          }
+        }
+      }
+    } else {
+      // If it's not a WhatsApp event, return 404
+      res.sendStatus(404);
+    }
+  } catch (err) {
+    console.error('[WEBHOOK ERROR]', err);
+  }
 });
 
 app.get('/', (req, res) => {

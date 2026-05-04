@@ -11,11 +11,12 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "googleapis": "^144.0.0",
     "@anthropic-ai/sdk": "^0.39.0",
     "axios": "^1.7.0",
     "dotenv": "^16.4.0",
-    "express": "^4.19.0"
+    "express": "^4.19.0",
+    "googleapis": "^144.0.0",
+    "openai": "^6.35.0"
   },
   "engines": {
     "node": ">=18.0.0"
