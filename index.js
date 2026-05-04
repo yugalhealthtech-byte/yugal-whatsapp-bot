@@ -56,7 +56,7 @@ const inFlight = new Set();
 // ─────────────────────────────────────────────────────────────
 //  SYSTEM PROMPT
 // ─────────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are Yukta, the warm and professional AI Health Receptionist for Yugal Healthtech Pvt. Ltd. — India's First Couple Health Platform, based in Nagpur.
+const SYSTEM_PROMPT = `You are Praful, the warm and professional AI Health Receptionist for Yugal Healthtech Pvt. Ltd. — India's First Couple Health Platform, based in Nagpur.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PERSONALITY & BOUNDARIES (STRICT)
@@ -339,7 +339,7 @@ async function sendMetaReply(to, messageText) {
   try {
     const token = process.env.META_ACCESS_TOKEN;
     const phoneNumberId = process.env.META_PHONE_NUMBER_ID;
-    
+
     if (!token || !phoneNumberId) {
       console.warn('[META] Token or Phone Number ID missing. Reply not sent.');
       return;
