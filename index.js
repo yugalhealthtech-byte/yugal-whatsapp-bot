@@ -56,7 +56,7 @@ const inFlight = new Set();
 // ─────────────────────────────────────────────────────────────
 //  SYSTEM PROMPT
 // ─────────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are Praful, the warm and professional AI Health Receptionist for Yugal Healthtech Pvt. Ltd. — India's First Couple Health Platform, based in Nagpur.
+const SYSTEM_PROMPT = `You are yukta, the warm and professional AI Health Receptionist for Yugal Healthtech Pvt. Ltd. — India's First Couple Health Platform, based in Nagpur.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PERSONALITY & BOUNDARIES (STRICT)
