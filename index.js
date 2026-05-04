@@ -351,6 +351,44 @@ app.post('/chat', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
+//  Meta WhatsApp Send Reply
+// ─────────────────────────────────────────────────────────────
+async function sendMetaReply(to, messageText) {
+  try {
+    const token = process.env.META_ACCESS_TOKEN;
+    const phoneNumberId = process.env.META_PHONE_NUMBER_ID;
+    
+    if (!token || !phoneNumberId) {
+      console.warn('[META] Token or Phone Number ID missing. Reply not sent.');
+      return;
+    }
+
+    const response = await fetch(`https://graph.facebook.com/v17.0/${phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: to,
+        type: 'text',
+        text: { body: messageText },
+      }),
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      console.error('[META SEND ERROR]', data);
+    } else {
+      console.log(`[META] Sent reply to ${to}`);
+    }
+  } catch (err) {
+    console.error('[META SEND ERROR]', err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 //  Meta WhatsApp Webhook Verification (GET)
 // ─────────────────────────────────────────────────────────────
 app.get('/webhook', (req, res) => {
