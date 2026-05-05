@@ -449,7 +449,7 @@ async function saveLeadToSheets(sessionId, lead, stage) {
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: process.env.GOOGLE_SHEET_ID,
-      range: 'Sheet1!A:L',
+      range: 'Sheet1!A:J',
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: [[
@@ -457,14 +457,12 @@ async function saveLeadToSheets(sessionId, lead, stage) {
           sessionId,          // B: BookingID
           lead.mobile || '',   // C: Phone
           lead.package || '',  // D: Package
-          lead.name || '',     // E: CustomerName
+          `${lead.name || ''} ${lead.age ? `(${lead.age})` : ''}`.trim(), // E: CustomerName (Name + Age)
           lead.partnerAge || '',// F: PartnerName
           lead.pincode || '',  // G: Pincode
           lead.address || '',  // H: Address
           lead.date || '',     // I: PreferredDate
-          lead.language || '', // J: Source
-          stage || '',         // K: Status
-          lead.age || ''       // L: TeamNotes
+          lead.language || ''  // J: Source
         ]]
       }
     });
