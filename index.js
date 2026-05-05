@@ -453,18 +453,18 @@ async function saveLeadToSheets(sessionId, lead, stage) {
       valueInputOption: 'USER_ENTERED',
       requestBody: {
         values: [[
-          timestamp,
-          sessionId,
-          lead.name || '',
-          lead.mobile || '',
-          lead.age || '',
-          lead.partnerAge || '',
-          lead.pincode || '',
-          lead.address || '',
-          lead.package || '',
-          lead.date || '',
-          lead.language || 'English',
-          stage || ''
+          timestamp,          // A: Timestamp
+          sessionId,          // B: BookingID
+          lead.mobile || '',   // C: Phone
+          lead.package || '',  // D: Package
+          lead.name || '',     // E: CustomerName
+          lead.partnerAge || '',// F: PartnerName
+          lead.pincode || '',  // G: Pincode
+          lead.address || '',  // H: Address
+          lead.date || '',     // I: PreferredDate
+          lead.language || '', // J: Source
+          stage || '',         // K: Status
+          lead.age || ''       // L: TeamNotes
         ]]
       }
     });
@@ -560,11 +560,6 @@ async function processChat(incomingSessionId, userMessage, userName) {
       session.leadSaved = true;
       await saveLeadToSheets(sessionId, session.lead, session.stage);
       await notifyTeam(sessionId, session.lead);
-    }
-
-    // Save partial every 10 messages
-    if (session.history.length % 10 === 0 && !session.leadSaved) {
-      await saveLeadToSheets(sessionId, session.lead, `partial_${session.stage}`);
     }
 
     console.log(`[CHAT] ${sessionId} | Stage: ${session.stage} | Msgs: ${session.history.length}`);
