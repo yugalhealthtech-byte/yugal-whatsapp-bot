@@ -387,14 +387,14 @@ function extractLeadData(session, userMessage, aiReply) {
   }
 
   // 1. Package Extraction (can happen anytime)
-  if (lowerMsg.includes('couple') || lowerMsg.includes('5499') || lowerMsg.includes('दोनों') || lowerMsg.includes('दोघे')) {
-    lead.package = 'Couple Bundle - Rs 5,499';
+  if (lowerMsg.includes('couple') || lowerMsg.includes('8499') || lowerMsg.includes('दोनों') || lowerMsg.includes('दोघे')) {
+    lead.package = 'Couple Bundle - Rs 8,499';
   } else if (lowerMsg.includes('male') || lowerMsg.includes('man') || lowerMsg.includes('पुरुष')) {
-    if (!lead.package) lead.package = 'Male Advanced - Rs 3,499';
+    if (!lead.package) lead.package = 'Male Advanced - Rs 4,499';
   } else if (lowerMsg.includes('female') || lowerMsg.includes('women') || lowerMsg.includes('woman') || lowerMsg.includes('स्त्री')) {
-    lead.package = 'Female Advanced - Rs 3,499';
+    lead.package = 'Female Advanced - Rs 4,499';
   } else if (lowerMsg.includes('essential') || lowerMsg.includes('1999')) {
-    lead.package = 'Essential - Rs 1,999';
+    lead.package = 'Essential - Rs 1,599';
   }
 
   // 2. Data Capture based on current stage
