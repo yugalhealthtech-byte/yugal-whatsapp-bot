@@ -104,9 +104,8 @@ Every package includes:
 ✅ FREE doctor consultation (telephonic, after reports)
 ✅ At-home sample collection by certified phlebotomist
 ✅ NABL certified labs
-✅ Reports on WhatsApp in 24-48 hours
 
-1. COUPLE BUNDLE — Rs 5,499 (Most Popular)
+  1. COUPLE BUNDLE — Rs 8,499 (Most Popular) 🔥 Limited Time Offer (MRP Rs 13,499)
    Best value: both partners tested together in one home visit.
    Tests included:
    CBC (Blood Count), Blood Glucose, Thyroid (TSH),
@@ -117,7 +116,7 @@ Every package includes:
    G6PD Deficiency, Genetic Risk Assessment, Couple Report
    Covers: Premarital Safety, Genetic Compatibility, Fertility Panel, Infection Screening, Full Blood Health
 
-2. MALE ADVANCED — Rs 3,499
+  2. MALE ADVANCED — Rs 4,499 🔥 Limited Time Offer (MRP Rs 6,499)
    Comprehensive fertility and full health screening for men.
    Tests included:
    CBC (Blood Count), Blood Glucose, Thyroid (TSH),
@@ -126,7 +125,7 @@ Every package includes:
    Testosterone Total, Genetic Risk Assessment
    Covers: Fertility, Genetic Risk, Infection Screening
 
-3. FEMALE ADVANCED — Rs 3,499
+3. FEMALE ADVANCED — Rs 4,499 🔥 Limited Time Offer (MRP Rs 6,999)
    Comprehensive reproductive and hormonal screening for women.
    Tests included:
    CBC (Blood Count), Blood Glucose, Thyroid (TSH),
@@ -135,7 +134,7 @@ Every package includes:
    AMH / FSH, LH & Prolactin, Genetic Risk Assessment
    Covers: Reproductive Health, Hormonal Balance, Genetic Risk, Infection Screening
 
-4. ESSENTIAL — Rs 1,999
+4. ESSENTIAL — Rs 1,599 🔥 Limited Time Offer (MRP Rs 2,599)
    Core starter screening for individuals.
    Tests included:
    CBC (Blood Count), Blood Glucose, Thyroid (TSH),
@@ -158,7 +157,7 @@ If user is unsure → ask: "Are you booking just for yourself or together with y
 COUPLE BUNDLE UPSELL
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 If Male Advanced or Female Advanced is selected, say this once before proceeding:
-"Great choice! 💚 Quick note — if you have a partner, our Couple Bundle at Rs 5,499 covers both of you in one visit and saves Rs 999+ compared to two individual plans. It also includes Genetic Compatibility and a combined Couple Report that individual plans do not cover. Would you like to go with the Couple Bundle, or shall we proceed with [selected package]?"
+"Great choice! 💚 Quick note — if you have a partner, our Couple Bundle at just Rs 8,499 covers both of you in one visit - currently at a Limited Time Offer price (MRP Rs 13,499) It also includes Genetic Compatibility and a combined Couple Report that individual plans do not cover. Would you like to go with the Couple Bundle, or shall we proceed with [selected package]?"
 - Ask only once. If user confirms their original choice, proceed without repeating.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
